@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0E4D64">
+<title>Guard House Scanner</title>
+<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;font-family:system-ui,sans-serif;background:#0E4D64;color:#fff;min-height:100vh;display:flex;flex-direction:column}
+  header{padding:14px 16px;display:flex;justify-content:space-between;align-items:center;font-weight:700}
+  header button{background:transparent;border:1px solid rgba(255,255,255,.5);color:#fff;border-radius:10px;padding:8px 12px;font-size:14px}
+  #net{display:none;background:#A3261A;padding:12px 16px;font-weight:700;text-align:center}
+  #cam{margin:0 16px;border-radius:18px;overflow:hidden;background:#000;min-height:300px}
+  #result{position:fixed;inset:0;display:none;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:24px;z-index:10}
+  #result.IN{display:flex;background:#1E7B4F}#result.OUT{display:flex;background:#B86E00}#result.ERR{display:flex;background:#A3261A}#result.WAIT{display:flex;background:#123F50}
+  #big{font-size:88px;font-weight:900;line-height:1}#who{font-size:32px;font-weight:800;margin-top:16px}#sub{font-size:20px;opacity:.9;margin-top:8px}
+  .pad{padding:16px}
+  .btn{width:100%;min-height:56px;border:none;border-radius:14px;background:#F4A62A;color:#2B1A00;font-size:18px;font-weight:800}
+  input{width:100%;min-height:52px;border:none;border-radius:12px;padding:0 14px;font-size:18px}
+  #results button{width:100%;min-height:52px;margin-top:8px;border:none;border-radius:12px;font-size:16px;font-weight:700;text-align:left;padding:0 14px}
+  .in{background:#E3F4EA;color:#14532D}.out{background:#FFF1D6;color:#5C3700}
+  #pinbox{display:none}
+  small{opacity:.85}
+</style>
+</head>
+<body>
+<header><span>UTC Dormitory · Guard House</span><button id="lock">Change PIN</button></header>
+<div id="net">No connection — scans are NOT being saved. Write them down by hand.</div>
+
+<div id="pinbox" class="pad">
+  <p>Enter the guard PIN to start.</p>
+  <input id="pin" type="password" inputmode="numeric" placeholder="PIN" aria-label="Guard PIN">
+  <p><button class="btn" id="savepin">Save PIN</button></p>
+  <small id="pinmsg"></small>
+</div>
+
+<div id="main">
+  <div id="cam"></div>
+  <div class="pad"><button class="btn" id="start">Start camera</button></div>
+  <div class="pad" style="padding-top:0">
+    <input id="q" placeholder="Forgot card? Search name or room…" aria-label="Search resident">
+    <div id="results"></div>
+  </div>
+</div>
+
+<div id="result"><div id="big"></div><div id="who"></div><div id="sub"></div></div>
+
+<script>
+  // ▼▼ https://script.google.com/macros/s/AKfycbzJ67oquEE41xFw57up7Llq-ZLwOb1lXEmhv7xKV4HzGyPTS3sICF7MVq5iPA_Nc2fLdg/exec (Deploy › Manage deployments › Web app URL, ends with /exec)
+  const API_URL = 'PASTE_YOUR_WEB_APP_URL_HERE';
+  // ▲▲
+
+  const $ = id => document.getElementById(id);
+  let pin = '';
+  try { pin = localStorage.getItem('guardPin') || ''; } catch (e) {}
+  let scanner = null, busy = false, lastCode = '', lastAt = 0, audio = null, wake = null;
+
+  function api(body) {
+    return fetch(API_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },   // avoids a CORS pre-check
+      body: JSON.stringify(Object.assign({ pin: pin }, body))
+    }).then(r => r.json());
+  }
+
+  function showPin(msg) { $('pinbox').style.display = 'block'; $('main').style.display = 'none'; $('pinmsg').textContent = msg || ''; }
+  function hidePin() { $('pinbox').style.display = 'none'; $('main').style.display = 'block'; }
+  $('lock').onclick = () => showPin();
+  $('savepin').onclick = () => {
+    pin = $('pin').value.trim();
+    $('pinmsg').textContent = 'Checking…';
+    api({ action: 'ping' }).then(r => {
+      if (!r.ok) return showPin('Wrong PIN, try again.');
+      try { localStorage.setItem('guardPin', pin); } catch (e) {}
+      hidePin();
+    }).catch(() => showPin('Cannot reach the sheet. Check internet and the URL.'));
+  };
+  if (!pin) showPin(); else hidePin();
+
+  function beep(f) {
+    try { audio = audio || new AudioContext(); const o = audio.createOscillator(); o.frequency.value = f; o.connect(audio.destination); o.start(); o.stop(audio.currentTime + 0.15); } catch (e) {}
+  }
+  let hideT;
+  function show(cls, big, who, sub, ms) {
+    $('result').className = cls; $('big').textContent = big; $('who').textContent = who || ''; $('sub').textContent = sub || '';
+    clearTimeout(hideT);
+    if (ms) hideT = setTimeout(() => { $('result').className = ''; busy = false; }, ms);
+  }
+  function handle(r) {
+    $('net').style.display = 'none';
+    if (!r.ok) { beep(220); if (navigator.vibrate) navigator.vibrate([100, 60, 100]); return show('ERR', r.msg === 'Wrong PIN' ? 'WRONG PIN' : 'NOT FOUND', r.msg, '', 2500); }
+    beep(r.dir === 'IN' ? 880 : 660); if (navigator.vibrate) navigator.vibrate(120);
+    show(r.dir, (r.dup ? 'ALREADY ' : '') + r.dir, r.name, r.block + ' · Room ' + r.room + (r.time ? ' · ' + r.time : ''), 2200);
+  }
+  function offline() { $('net').style.display = 'block'; beep(220); show('ERR', 'NOT SAVED', 'No connection', 'Write it down by hand', 3000); }
+
+  function onScan(code) {
+    const now = Date.now();
+    if (busy || (code === lastCode && now - lastAt < 4000)) return;   // same card held in front of camera
+    busy = true; lastCode = code; lastAt = now;
+    show('WAIT', '…', 'Saving');
+    api({ action: 'scan', code: code }).then(handle).catch(offline);
+  }
+
+  $('start').onclick = async () => {
+    beep(1);   // unlocks sound on iPhone
+    try { if ('wakeLock' in navigator) wake = await navigator.wakeLock.request('screen'); } catch (e) {}
+    if (scanner) return;
+    scanner = new Html5Qrcode('cam');
+    scanner.start({ facingMode: 'environment' }, { fps: 10, qrbox: { width: 240, height: 240 } }, onScan, () => {})
+      .then(() => { $('start').textContent = 'Camera on — hold card to camera'; $('start').disabled = true; })
+      .catch(err => { scanner = null; show('ERR', 'NO CAMERA', 'Allow camera access', String(err).slice(0, 80), 4000); });
+  };
+  document.addEventListener('visibilitychange', async () => {
+    if (document.visibilityState === 'visible' && wake === null && 'wakeLock' in navigator) { try { wake = await navigator.wakeLock.request('screen'); } catch (e) {} }
+  });
+
+  // Manual search for forgotten cards
+  let qT;
+  $('q').addEventListener('input', e => {
+    clearTimeout(qT);
+    const q = e.target.value.trim();
+    if (q.length < 2) { $('results').innerHTML = ''; return; }
+    qT = setTimeout(() => api({ action: 'search', q: q }).then(r => {
+      const box = $('results'); box.innerHTML = '';
+      (r.list || []).forEach(p => ['IN', 'OUT'].forEach(d => {
+        const b = document.createElement('button');
+        b.className = d === 'IN' ? 'in' : 'out';
+        b.textContent = d + ': ' + p.name + ' (' + p.block + ' ' + p.room + ')';
+        b.onclick = () => { busy = true; show('WAIT', '…', 'Saving'); api({ action: 'manual', id: p.id, dir: d }).then(handle).catch(offline); $('q').value = ''; box.innerHTML = ''; };
+        box.appendChild(b);
+      }));
+    }).catch(offline), 350);
+  });
+</script>
+</body>
+</html>
